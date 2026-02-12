@@ -177,7 +177,7 @@ def detect_peak_candidates(
     chromatogram: Chromatogram,
     max_candidates: int = 5,
     min_relative_height: float = 0.1,
-    min_distance_points: int = 3,
+    min_distance_points: int = 1,
 ) -> list[dict[str, float]]:
     """Find candidate local maxima for manual peak selection."""
     x = np.asarray(chromatogram.time_min, dtype=float)
