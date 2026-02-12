@@ -4,3 +4,4 @@ __pycache__/
 .streamlit/
 data/retention_library.json
 data/metabolite_notes.json
+data/metabolite_tables/
