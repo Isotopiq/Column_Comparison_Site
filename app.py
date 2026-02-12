@@ -13,9 +13,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from column_compare.analysis import (
+    MetaboliteTarget,
     assess_peak_acceptability,
     build_acceptability_matrix,
     compute_peak_metrics,
+    detect_peak_candidates,
     extract_chromatograms,
     load_ms1_experiment,
     parse_metabolite_table,
@@ -174,6 +176,145 @@ def selected_rows_from_event(event: Any) -> list[int]:
         return list(rows) if rows is not None else []
     except Exception:
         return []
+
+
+def build_expected_rt_lookup(
+    metabolite_df: pd.DataFrame,
+    name_col: str,
+    rt_col: str | None,
+) -> dict[str, float | None]:
+    lookup: dict[str, float | None] = {}
+    if rt_col is None or rt_col not in metabolite_df.columns:
+        return lookup
+
+    for _, row in metabolite_df.iterrows():
+        name = str(row[name_col]).strip()
+        if not name:
+            continue
+        value = row[rt_col]
+        if pd.isna(value):
+            lookup[name] = None
+        else:
+            try:
+                lookup[name] = float(value)
+            except (TypeError, ValueError):
+                lookup[name] = None
+    return lookup
+
+
+def build_peak_selection_table(
+    metrics_df: pd.DataFrame,
+    candidate_peaks: dict[tuple[str, str, str, str], list[dict[str, float]]],
+) -> pd.DataFrame:
+    if metrics_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "metabolite",
+                "file_name",
+                "column_id",
+                "run_id",
+                "candidate_peak_rts_min",
+                "selected_peak_rt_min",
+            ]
+        )
+
+    rows: list[dict[str, Any]] = []
+    ordered = (
+        metrics_df[["metabolite", "file_name", "column_id", "run_id", "apex_rt_min"]]
+        .drop_duplicates()
+        .sort_values(["metabolite", "column_id", "run_id", "file_name"])
+    )
+    for _, row in ordered.iterrows():
+        metabolite = str(row["metabolite"])
+        file_name = str(row["file_name"])
+        column_id = str(row["column_id"])
+        run_id = str(row["run_id"])
+        key = (run_id, column_id, file_name, metabolite)
+        candidates = candidate_peaks.get(key, [])
+        candidate_rts = [item["rt_min"] for item in candidates if "rt_min" in item]
+        candidate_text = ", ".join(f"{value:.4f}" for value in candidate_rts)
+        rows.append(
+            {
+                "metabolite": metabolite,
+                "file_name": file_name,
+                "column_id": column_id,
+                "run_id": run_id,
+                "candidate_peak_rts_min": candidate_text,
+                "selected_peak_rt_min": row["apex_rt_min"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def recompute_metrics_with_peak_selection(
+    base_metrics_df: pd.DataFrame,
+    processed_chromatograms: dict[tuple[str, str, str, str], Any],
+    peak_selection_df: pd.DataFrame,
+    integration_bounds: dict[str, tuple[float | None, float | None]],
+    expected_rt_lookup: dict[str, float | None],
+    default_rt_window_min: float,
+    selected_rt_window_min: float,
+) -> pd.DataFrame:
+    if base_metrics_df.empty:
+        return base_metrics_df.copy()
+
+    selected = peak_selection_df.copy()
+    selected["selected_peak_rt_min"] = pd.to_numeric(
+        selected["selected_peak_rt_min"], errors="coerce"
+    )
+    selected_lookup: dict[tuple[str, str, str, str], float] = {}
+    for _, row in selected.iterrows():
+        if pd.isna(row["selected_peak_rt_min"]):
+            continue
+        key = (
+            str(row["run_id"]),
+            str(row["column_id"]),
+            str(row["file_name"]),
+            str(row["metabolite"]),
+        )
+        selected_lookup[key] = float(row["selected_peak_rt_min"])
+
+    updated_rows: list[dict[str, Any]] = []
+    for _, row in base_metrics_df.iterrows():
+        metabolite = str(row["metabolite"])
+        run_id = str(row["run_id"])
+        column_id = str(row["column_id"])
+        file_name = str(row.get("file_name", ""))
+        key = (run_id, column_id, file_name, metabolite)
+        trace = processed_chromatograms.get(key)
+        if trace is None:
+            record = row.to_dict()
+            record["selected_peak_rt_min"] = selected_lookup.get(key)
+            updated_rows.append(record)
+            continue
+
+        mz = float(row["mz"])
+        expected_rt = expected_rt_lookup.get(metabolite)
+        selected_rt = selected_lookup.get(key)
+        if selected_rt is not None:
+            expected_rt = selected_rt
+            rt_window = selected_rt_window_min
+        else:
+            rt_window = default_rt_window_min
+
+        target = MetaboliteTarget(name=metabolite, mz=mz, expected_rt_min=expected_rt_lookup.get(metabolite))
+        bounds = integration_bounds.get(metabolite, (None, None))
+        metrics = compute_peak_metrics(
+            chromatogram=trace,
+            run_id=run_id,
+            column_id=column_id,
+            target=target,
+            expected_rt_min=expected_rt,
+            rt_window_min=rt_window,
+            integration_start_min=bounds[0],
+            integration_end_min=bounds[1],
+        )
+        record = metrics.to_record()
+        record["file_name"] = file_name
+        record["selected_peak_rt_min"] = selected_rt
+        updated_rows.append(record)
+
+    return pd.DataFrame(updated_rows)
 
 
 def default_metabolite_template() -> pd.DataFrame:
@@ -400,7 +541,12 @@ def run_analysis(
     tolerance: float,
     tolerance_unit: str,
     rt_window_min: float,
-) -> tuple[pd.DataFrame, dict[tuple[str, str, str, str], Any], dict[tuple[str, str, str, str], Any]]:
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str, str, str], Any],
+    dict[tuple[str, str, str, str], Any],
+    dict[tuple[str, str, str, str], list[dict[str, float]]],
+]:
     targets = parse_metabolite_table(metabolite_df, name_col=name_col, mz_col=mz_col, rt_col=rt_col)
     if not targets:
         raise ValueError("No valid metabolite rows were found after parsing your table.")
@@ -409,6 +555,7 @@ def run_analysis(
     metrics_rows: list[dict[str, Any]] = []
     raw_chromatograms: dict[tuple[str, str, str, str], Any] = {}
     processed_chromatograms: dict[tuple[str, str, str, str], Any] = {}
+    candidate_peaks: dict[tuple[str, str, str, str], list[dict[str, float]]] = {}
 
     for _, row in mapping_df.iterrows():
         file_name = str(row["file_name"])
@@ -454,10 +601,16 @@ def run_analysis(
                 key = (run_id, column_id, file_name, target.name)
                 raw_chromatograms[key] = raw_trace
                 processed_chromatograms[key] = processed_trace
+                candidate_peaks[key] = detect_peak_candidates(processed_trace)
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    return pd.DataFrame(metrics_rows), raw_chromatograms, processed_chromatograms
+    return (
+        pd.DataFrame(metrics_rows),
+        raw_chromatograms,
+        processed_chromatograms,
+        candidate_peaks,
+    )
 
 
 def app() -> None:
@@ -750,35 +903,28 @@ def app() -> None:
             {
                 "file_name": file.name,
                 "run_id": Path(file.name).stem,
-                "column_id": infer_default_column(file.name),
+                "column_id": "",
             }
             for file in uploaded_runs
         ]
     )
     st.caption(
-        "Assign each mzXML file to the correct column. "
+        "Manually assign each mzXML file to the correct column. "
         "Each run_id must be unique so chromatograms are tracked accurately."
     )
-    default_column_options = sorted(default_mapping["column_id"].dropna().astype(str).unique().tolist())
-    custom_column_text = st.text_input(
-        "Column IDs (comma-separated, used as assignment options)",
-        value=", ".join(default_column_options),
-        help="Example: HILIC_A, HILIC_B, RP_18",
-    )
-    custom_column_options = [
-        token.strip() for token in custom_column_text.split(",") if token.strip()
-    ]
-    column_options = sorted(set(default_column_options + custom_column_options))
-    if not column_options:
-        column_options = ["Column_1"]
 
     mapping_df = st.data_editor(
         default_mapping,
         disabled=["file_name"],
         column_config={
-            "column_id": st.column_config.SelectboxColumn(
+            "run_id": st.column_config.TextColumn(
+                "run_id",
+                help="Unique run label for this mzXML file.",
+                required=True,
+            ),
+            "column_id": st.column_config.TextColumn(
                 "column_id",
-                options=column_options if column_options else default_column_options,
+                help="Enter the column identifier manually (e.g., HILIC_25min_A).",
                 required=True,
             ),
         },
@@ -790,7 +936,7 @@ def app() -> None:
     for col in ("run_id", "column_id"):
         mapping_df[col] = mapping_df[col].astype(str).str.strip()
     mapping_df["run_id"] = mapping_df["run_id"].replace("", pd.NA).fillna(mapping_df["file_name"])
-    mapping_df["column_id"] = mapping_df["column_id"].replace("", pd.NA).fillna(mapping_df["run_id"])
+    mapping_df["column_id"] = mapping_df["column_id"].fillna("").astype(str).str.strip()
 
     duplicate_runs = mapping_df[mapping_df["run_id"].duplicated(keep=False)]["run_id"].tolist()
     duplicate_runs = sorted(set(duplicate_runs))
@@ -865,7 +1011,7 @@ def app() -> None:
     if rerun_requested:
         with st.spinner("Running pyOpenMS extraction and peak analysis..."):
             try:
-                metrics_df, raw_chromatograms, processed_chromatograms = run_analysis(
+                metrics_df, raw_chromatograms, processed_chromatograms, candidate_peaks = run_analysis(
                     uploaded_runs=uploaded_runs,
                     mapping_df=mapping_df,
                     metabolite_df=metabolite_df,
@@ -890,7 +1036,11 @@ def app() -> None:
             "metrics_df": metrics_df,
             "raw_chromatograms": raw_chromatograms,
             "processed_chromatograms": processed_chromatograms,
+            "candidate_peaks": candidate_peaks,
         }
+        st.session_state["peak_selection_signature"] = None
+        st.session_state["peak_selection_df_json"] = None
+        st.session_state["selected_metrics_df_json"] = None
         st.success("Analysis completed.")
 
     state = st.session_state.get("analysis_state", {})
@@ -901,12 +1051,109 @@ def app() -> None:
     metrics_df: pd.DataFrame = state["metrics_df"]
     raw_chromatograms = state["raw_chromatograms"]
     processed_chromatograms = state["processed_chromatograms"]
+    candidate_peaks = state.get("candidate_peaks", {})
     if metrics_df.empty:
         st.warning("No peak metrics were generated.")
         return
 
+    expected_rt_lookup = build_expected_rt_lookup(
+        metabolite_df=metabolite_df,
+        name_col=name_col,
+        rt_col=rt_col,
+    )
+    if st.session_state.get("peak_selection_signature") != current_signature:
+        initial_peak_selection = build_peak_selection_table(metrics_df, candidate_peaks)
+        st.session_state["peak_selection_signature"] = current_signature
+        st.session_state["peak_selection_df_json"] = initial_peak_selection.to_json(
+            orient="split"
+        )
+        st.session_state["selected_metrics_df_json"] = metrics_df.to_json(orient="split")
+
+    peak_selection_df = pd.read_json(
+        io.StringIO(st.session_state["peak_selection_df_json"]),
+        orient="split",
+    )
+    st.subheader("4) Select target peak for each analyte/run")
+    st.caption(
+        "When multiple peaks exist, set the expected peak RT manually for each analyte and mzXML file, "
+        "then apply the selection before comparing columns."
+    )
+    selected_rt_window_min = float(
+        st.number_input(
+            "Search window around selected peak (+/- min)",
+            min_value=0.01,
+            value=max(0.2, rt_window_min if rt_window_min > 0 else 0.2),
+            step=0.05,
+            help="Peak finder will prioritize the selected RT within this window.",
+        )
+    )
+    filter_metabolites = st.multiselect(
+        "Filter analytes in peak-selection table (optional)",
+        sorted(peak_selection_df["metabolite"].unique().tolist()),
+        default=[],
+    )
+    peak_selection_view = peak_selection_df.copy()
+    if filter_metabolites:
+        peak_selection_view = peak_selection_view[
+            peak_selection_view["metabolite"].isin(filter_metabolites)
+        ].copy()
+    edited_peak_selection_view = st.data_editor(
+        peak_selection_view,
+        column_config={
+            "selected_peak_rt_min": st.column_config.NumberColumn(
+                "selected_peak_rt_min",
+                help="Set to the RT of the correct peak for this analyte/run.",
+                format="%.4f",
+            )
+        },
+        disabled=[
+            "metabolite",
+            "file_name",
+            "column_id",
+            "run_id",
+            "candidate_peak_rts_min",
+        ],
+        hide_index=True,
+        width="stretch",
+        key="peak_selection_editor",
+    )
+    if filter_metabolites:
+        key_cols = ["metabolite", "file_name", "column_id", "run_id"]
+        merged_selection = peak_selection_df.set_index(key_cols)
+        edited_subset = edited_peak_selection_view.set_index(key_cols)
+        merged_selection.loc[edited_subset.index, "selected_peak_rt_min"] = edited_subset[
+            "selected_peak_rt_min"
+        ]
+        updated_peak_selection_df = merged_selection.reset_index()
+    else:
+        updated_peak_selection_df = edited_peak_selection_view.copy()
+
+    if st.button("Apply selected peaks for comparison"):
+        st.session_state["peak_selection_df_json"] = updated_peak_selection_df.to_json(
+            orient="split"
+        )
+        selected_metrics_df = recompute_metrics_with_peak_selection(
+            base_metrics_df=metrics_df,
+            processed_chromatograms=processed_chromatograms,
+            peak_selection_df=updated_peak_selection_df,
+            integration_bounds=integration_bounds,
+            expected_rt_lookup=expected_rt_lookup,
+            default_rt_window_min=rt_window_min,
+            selected_rt_window_min=selected_rt_window_min,
+        )
+        st.session_state["selected_metrics_df_json"] = selected_metrics_df.to_json(
+            orient="split"
+        )
+        st.success("Selected peak targets applied.")
+
+    metrics_for_comparison = pd.read_json(
+        io.StringIO(st.session_state["selected_metrics_df_json"]),
+        orient="split",
+    )
+    if "selected_peak_rt_min" not in metrics_for_comparison.columns:
+        metrics_for_comparison["selected_peak_rt_min"] = pd.NA
     scored_metrics_df = assess_peak_acceptability(
-        metrics=metrics_df,
+        metrics=metrics_for_comparison,
         min_snr=accept_min_snr,
         max_fwhm_min=accept_max_fwhm,
         min_asymmetry_10=accept_min_asym,
@@ -920,7 +1167,7 @@ def app() -> None:
         for metabolite, payload in notes_store.get("notes", {}).items()
     }
 
-    st.subheader("4) Peak-shape comparison (side-by-side by column)")
+    st.subheader("5) Peak-shape comparison (side-by-side by column)")
     metabolite_browser_df = (
         scored_metrics_df.groupby("metabolite", dropna=False)
         .agg(
@@ -1033,6 +1280,7 @@ def app() -> None:
                 "column_id",
                 "run_id",
                 "metabolite",
+                "selected_peak_rt_min",
                 "apex_rt_min",
                 "fwhm_min",
                 "asymmetry_10",
@@ -1049,11 +1297,11 @@ def app() -> None:
         width="stretch",
     )
 
-    st.subheader("5) Column-level efficiency summary")
+    st.subheader("6) Column-level efficiency summary")
     summary_df = summarise_columns(scored_metrics_df)
     st.dataframe(summary_df, width="stretch")
 
-    st.subheader("6) Recommend best column for target analytes")
+    st.subheader("7) Recommend best column for target analytes")
     selected_targets = st.multiselect(
         "Metabolites the end user wants to measure",
         metabolite_options,
@@ -1073,7 +1321,7 @@ def app() -> None:
         )
         st.plotly_chart(ranking_fig, width="stretch")
 
-    st.subheader("7) Heatmap: acceptable peak shape by metabolite and column")
+    st.subheader("8) Heatmap: acceptable peak shape by metabolite and column")
     st.caption(
         "Cell values represent % of runs in each column where the metabolite passes current acceptability thresholds."
     )
@@ -1093,7 +1341,7 @@ def app() -> None:
         st.plotly_chart(heatmap_fig, width="stretch")
         st.dataframe(heatmap_df, width="stretch")
 
-    st.subheader("8) Metabolite notes")
+    st.subheader("9) Metabolite notes")
     st.caption("Add notes for each metabolite. Notes are saved and available in future sessions.")
     notes_editor_df = notes_store_to_dataframe(notes_store, metabolites=metabolite_options)
     notes_editor_df = notes_editor_df[["metabolite", "note", "last_updated"]]
@@ -1114,7 +1362,7 @@ def app() -> None:
             for metabolite, payload in notes_store.get("notes", {}).items()
         }
 
-    st.subheader("9) Save retention times to standards library")
+    st.subheader("10) Save retention times to standards library")
     st.caption(
         "This saves apex retention times from the current standards run into a local JSON library for future matching."
     )
@@ -1154,7 +1402,7 @@ def app() -> None:
                 )
                 st.plotly_chart(library_fit_fig, width="stretch")
 
-    st.subheader("10) Export per-metabolite comparison report (HTML/PDF)")
+    st.subheader("11) Export per-metabolite comparison report (HTML/PDF)")
     report_metabolite = st.selectbox(
         "Metabolite for export",
         metabolite_options,
@@ -1234,7 +1482,7 @@ def app() -> None:
                 mime="application/pdf",
             )
 
-    st.subheader("11) Generate feature preview images")
+    st.subheader("12) Generate feature preview images")
     st.caption(
         "Creates preview PNGs for major app features and packages them in a ZIP file."
     )

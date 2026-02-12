@@ -173,6 +173,48 @@ def preprocess_chromatogram(
     )
 
 
+def detect_peak_candidates(
+    chromatogram: Chromatogram,
+    max_candidates: int = 5,
+    min_relative_height: float = 0.1,
+    min_distance_points: int = 3,
+) -> list[dict[str, float]]:
+    """Find candidate local maxima for manual peak selection."""
+    x = np.asarray(chromatogram.time_min, dtype=float)
+    y = np.asarray(chromatogram.intensity, dtype=float)
+    if x.size < 3 or y.size < 3:
+        return []
+
+    max_intensity = float(np.max(y))
+    if max_intensity <= 0:
+        return []
+
+    threshold = max_intensity * float(np.clip(min_relative_height, 0.0, 1.0))
+    candidate_indices = [
+        idx
+        for idx in range(1, len(y) - 1)
+        if y[idx] >= y[idx - 1] and y[idx] >= y[idx + 1] and y[idx] >= threshold
+    ]
+    if not candidate_indices:
+        apex_idx = int(np.argmax(y))
+        candidate_indices = [apex_idx]
+
+    candidate_indices = sorted(candidate_indices, key=lambda idx: y[idx], reverse=True)
+    filtered: list[int] = []
+    for idx in candidate_indices:
+        if all(abs(idx - existing) >= min_distance_points for existing in filtered):
+            filtered.append(idx)
+        if len(filtered) >= max_candidates:
+            break
+
+    candidates = [
+        {"rt_min": float(x[idx]), "intensity": float(y[idx])}
+        for idx in filtered
+        if idx < len(x) and idx < len(y)
+    ]
+    return sorted(candidates, key=lambda item: item["intensity"], reverse=True)
+
+
 def _linear_interpolate_x(
     x1: float, y1: float, x2: float, y2: float, y_target: float
 ) -> float | None:
@@ -326,7 +368,9 @@ def compute_peak_metrics(
     apex_intensity = float(y_segment[apex_idx])
 
     baseline = float(np.percentile(y_segment, 10))
-    area = float(np.trapz(np.clip(y_segment - baseline, a_min=0, a_max=None), x_segment))
+    area = float(
+        np.trapezoid(np.clip(y_segment - baseline, a_min=0, a_max=None), x_segment)
+    )
 
     half_height = baseline + (apex_intensity - baseline) * 0.5
     left_hh = _find_crossing_left(x_segment, y_segment, apex_idx, half_height)

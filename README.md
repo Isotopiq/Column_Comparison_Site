@@ -65,19 +65,21 @@ Upload one or more standard runs. In the app you can edit:
 1. Upload metabolite list and mzXML files.
    - Metabolite upload now supports **Upload new file** or **Use saved file**.
    - Click **Confirm metabolite table and continue** to unlock mzXML upload/viewer.
+   - Enter `column_id` manually for each mzXML file to control exact file-to-column mapping.
 2. Adjust processing:
    - smoothing window
    - baseline correction mode
 3. Edit integration bounds per metabolite (optional).
-4. Run comparison and inspect:
+4. Select target peaks for analytes with multiple peaks (optional but recommended).
+5. Run comparison and inspect:
    - click metabolite rows to load chromatograms
    - peak-shape facets by column or by file
    - run-level metrics
    - column ranking
    - acceptability heatmap
-5. Add metabolite notes and save them.
-6. Export per-metabolite reports (HTML/PDF).
-7. Generate preview image pack (PNG ZIP).
+6. Add metabolite notes and save them.
+7. Export per-metabolite reports (HTML/PDF).
+8. Generate preview image pack (PNG ZIP).
 
 ## Notes
 
