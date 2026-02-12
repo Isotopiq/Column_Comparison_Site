@@ -148,7 +148,13 @@ def build_metabolite_report_pdf(
     pdf.set_font("Helvetica", style="B", size=12)
     pdf.cell(0, 7, "Saved note", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=10)
-    pdf.multi_cell(0, 5, note.strip() if note else "No note saved.")
+    pdf.multi_cell(
+        0,
+        5,
+        note.strip() if note else "No note saved.",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
     pdf.ln(2)
 
     if settings:
@@ -156,7 +162,7 @@ def build_metabolite_report_pdf(
         pdf.cell(0, 7, "Settings", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", size=10)
         for key, value in settings.items():
-            pdf.multi_cell(0, 5, f"{key}: {value}")
+            pdf.multi_cell(0, 5, f"{key}: {value}", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
 
     image_bytes = figure_to_png_bytes(peak_shape_figure)
@@ -188,19 +194,20 @@ def build_metabolite_report_pdf(
     ].sort_values(["column_id", "run_id"])
     preview = preview.head(40).reset_index(drop=True)
 
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", style="B", size=12)
     pdf.cell(0, 7, "Run-level metrics (first 40 rows)", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Courier", size=8)
     header = "column | run | rt | fwhm | asym | plates | snr | area"
-    pdf.multi_cell(0, 4, header)
-    pdf.multi_cell(0, 4, "-" * len(header))
+    pdf.multi_cell(0, 4, header, new_x="LMARGIN", new_y="NEXT")
     for _, row in preview.iterrows():
         line = (
-            f"{row['column_id']} | {row['run_id']} | "
+            f"{_trim(row['column_id'], 16)} | {_trim(row['run_id'], 24)} | "
             f"{_fmt(row['apex_rt_min'])} | {_fmt(row['fwhm_min'])} | {_fmt(row['asymmetry_10'])} | "
             f"{_fmt(row['efficiency_plates'])} | {_fmt(row['snr'])} | {_fmt(row['peak_area'])}"
         )
-        pdf.multi_cell(0, 4, line)
+        pdf.multi_cell(0, 4, line, new_x="LMARGIN", new_y="NEXT")
 
     output = pdf.output(dest="S")
     if isinstance(output, (bytes, bytearray)):
@@ -214,6 +221,13 @@ def _fmt(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4g}"
     return str(value)
+
+
+def _trim(value: Any, max_len: int) -> str:
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
 
 
 def build_preview_image_bundle(figures: dict[str, Any]) -> dict[str, bytes]:

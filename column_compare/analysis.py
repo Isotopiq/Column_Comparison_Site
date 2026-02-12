@@ -477,13 +477,18 @@ def assess_peak_acceptability(
         return metrics.copy()
 
     scored = metrics.copy()
-    scored["snr_ok"] = scored["snr"].fillna(-np.inf) >= float(min_snr)
-    scored["fwhm_ok"] = scored["fwhm_min"].fillna(np.inf) <= float(max_fwhm_min)
-    scored["asymmetry_ok"] = scored["asymmetry_10"].between(
+    snr_values = pd.to_numeric(scored["snr"], errors="coerce")
+    fwhm_values = pd.to_numeric(scored["fwhm_min"], errors="coerce")
+    asymmetry_values = pd.to_numeric(scored["asymmetry_10"], errors="coerce")
+    efficiency_values = pd.to_numeric(scored["efficiency_plates"], errors="coerce")
+
+    scored["snr_ok"] = snr_values.fillna(-np.inf) >= float(min_snr)
+    scored["fwhm_ok"] = fwhm_values.fillna(np.inf) <= float(max_fwhm_min)
+    scored["asymmetry_ok"] = asymmetry_values.between(
         float(min_asymmetry_10), float(max_asymmetry_10), inclusive="both"
     )
-    scored["efficiency_ok"] = (
-        scored["efficiency_plates"].fillna(-np.inf) >= float(min_efficiency_plates)
+    scored["efficiency_ok"] = efficiency_values.fillna(-np.inf) >= float(
+        min_efficiency_plates
     )
 
     scored["is_acceptable_shape"] = (
