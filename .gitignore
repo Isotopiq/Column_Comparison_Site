@@ -3,3 +3,4 @@ __pycache__/
 .mypy_cache/
 .streamlit/
 data/retention_library.json
+data/metabolite_notes.json

@@ -139,3 +139,97 @@ def merge_expected_rts(
         updated[metabolite_col].astype(str).map(expected_lookup)
     )
     return updated
+
+
+def default_notes_store() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "updated_at": _timestamp(),
+        "notes": {},
+    }
+
+
+def load_notes_store(path: str | Path) -> dict[str, Any]:
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return default_notes_store()
+
+    with path_obj.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    if not isinstance(raw, dict):
+        return default_notes_store()
+    if "notes" not in raw or not isinstance(raw["notes"], dict):
+        return default_notes_store()
+    return raw
+
+
+def save_notes_store(path: str | Path, notes_store: dict[str, Any]) -> None:
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    notes_store["updated_at"] = _timestamp()
+    with path_obj.open("w", encoding="utf-8") as f:
+        json.dump(notes_store, f, indent=2, sort_keys=True)
+
+
+def notes_store_to_dataframe(
+    notes_store: dict[str, Any], metabolites: list[str] | None = None
+) -> pd.DataFrame:
+    notes = notes_store.get("notes", {})
+    rows: list[dict[str, Any]] = []
+    metabolites_set = set(metabolites or [])
+
+    for metabolite, payload in notes.items():
+        rows.append(
+            {
+                "metabolite": metabolite,
+                "note": payload.get("note", ""),
+                "last_updated": payload.get("last_updated"),
+            }
+        )
+        metabolites_set.add(metabolite)
+
+    for metabolite in sorted(metabolites_set):
+        if metabolite in notes:
+            continue
+        rows.append(
+            {
+                "metabolite": metabolite,
+                "note": "",
+                "last_updated": None,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["metabolite", "note", "last_updated"])
+    return pd.DataFrame(rows).sort_values("metabolite").reset_index(drop=True)
+
+
+def update_notes_store_from_dataframe(
+    notes_store: dict[str, Any],
+    notes_df: pd.DataFrame,
+    clear_missing: bool = False,
+) -> dict[str, Any]:
+    updated = notes_store.copy()
+    notes_bucket = updated.setdefault("notes", {})
+
+    if clear_missing:
+        notes_bucket.clear()
+
+    for _, row in notes_df.iterrows():
+        metabolite = str(row.get("metabolite", "")).strip()
+        if not metabolite:
+            continue
+
+        note = str(row.get("note", "") or "").strip()
+        if not note:
+            notes_bucket.pop(metabolite, None)
+            continue
+
+        notes_bucket[metabolite] = {
+            "note": note,
+            "last_updated": _timestamp(),
+        }
+
+    updated["updated_at"] = _timestamp()
+    return updated
