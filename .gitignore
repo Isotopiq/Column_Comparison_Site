@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.streamlit/
+data/retention_library.json
+data/metabolite_notes.json
+data/metabolite_tables/
