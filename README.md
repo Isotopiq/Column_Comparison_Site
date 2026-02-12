@@ -7,6 +7,7 @@ Streamlit application for comparing chromatographic column performance using sta
 - Upload **multiple mzXML files** from different columns/runs.
 - Upload a **metabolite list** (name + target m/z, optional expected RT).
 - Extract EICs for each metabolite with configurable m/z tolerance.
+- Choose XIC extraction mode (`nearest`, `max`, `sum`) to better match real MS1 peak shape.
 - Compare **peak shape side-by-side by column**.
 - Optional **smoothing** and **baseline correction** before peak analysis.
 - Editable **integration bounds** per metabolite.

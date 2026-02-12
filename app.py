@@ -383,6 +383,7 @@ def hash_inputs(
     integration_bounds_df: pd.DataFrame,
     tolerance: float,
     tolerance_unit: str,
+    xic_aggregation: str,
     rt_window_min: float,
     smoothing_window_points: int,
     baseline_mode: str,
@@ -395,6 +396,7 @@ def hash_inputs(
     digest = hashlib.sha256()
     digest.update(str(tolerance).encode())
     digest.update(tolerance_unit.encode())
+    digest.update(xic_aggregation.encode())
     digest.update(str(rt_window_min).encode())
     digest.update(str(smoothing_window_points).encode())
     digest.update(baseline_mode.encode())
@@ -531,6 +533,7 @@ def run_analysis(
     mapping_df: pd.DataFrame,
     metabolite_df: pd.DataFrame,
     integration_bounds: dict[str, tuple[float | None, float | None]],
+    xic_aggregation: str,
     smoothing_window_points: int,
     baseline_mode: str,
     baseline_window_points: int,
@@ -574,6 +577,7 @@ def run_analysis(
                 targets=targets,
                 tolerance=tolerance,
                 tolerance_unit=tolerance_unit,
+                intensity_aggregation=xic_aggregation,
             )
             for target in targets:
                 raw_trace = trace_map[target.name]
@@ -635,6 +639,15 @@ def app() -> None:
             step=1.0 if tolerance_unit == "ppm" else 0.001,
             format="%.5f",
         )
+        xic_aggregation = st.selectbox(
+            "XIC intensity extraction mode",
+            ["nearest", "max", "sum"],
+            index=0,
+            help=(
+                "nearest uses the closest m/z point per scan (most shape-faithful). "
+                "max uses the local max in the m/z window. sum integrates the full m/z window."
+            ),
+        )
         rt_window_min = st.number_input(
             "Expected RT search window (+/- min)",
             min_value=0.0,
@@ -646,7 +659,7 @@ def app() -> None:
         st.markdown("### Signal preprocessing")
         smoothing_enabled = st.checkbox(
             "Enable smoothing",
-            value=True,
+            value=False,
             help="Applies moving-average smoothing before peak picking.",
         )
         smoothing_window_points = int(
@@ -661,7 +674,7 @@ def app() -> None:
         baseline_mode = st.selectbox(
             "Baseline correction",
             ["none", "rolling_min", "percentile"],
-            index=1,
+            index=0,
         )
         baseline_window_points = int(
             st.number_input(
@@ -994,6 +1007,7 @@ def app() -> None:
         integration_bounds_df=bounds_df,
         tolerance=tolerance,
         tolerance_unit=tolerance_unit,
+        xic_aggregation=xic_aggregation,
         rt_window_min=rt_window_min,
         smoothing_window_points=smoothing_window_points,
         baseline_mode=baseline_mode,
@@ -1016,6 +1030,7 @@ def app() -> None:
                     mapping_df=mapping_df,
                     metabolite_df=metabolite_df,
                     integration_bounds=integration_bounds,
+                    xic_aggregation=xic_aggregation,
                     smoothing_window_points=smoothing_window_points,
                     baseline_mode=baseline_mode,
                     baseline_window_points=baseline_window_points,
@@ -1225,12 +1240,16 @@ def app() -> None:
     trace_view_mode = st.radio(
         "Trace view",
         ["Processed trace", "Raw trace"],
-        index=0,
+        index=1,
         horizontal=True,
+    )
+    st.caption(
+        "Raw trace reflects direct MS1 XIC extraction from each scan; "
+        "processed trace includes optional smoothing/baseline correction."
     )
     normalize_shape = st.checkbox(
         "Normalize each run to max=1 (shape-only view)",
-        value=True,
+        value=False,
         help="Useful when comparing peak shape independent of absolute signal.",
     )
     active_chromatograms = (
@@ -1417,7 +1436,7 @@ def app() -> None:
             .sort_values(["column_id", "run_id"])
             .reset_index(drop=True)
         )
-        report_plot_df = build_plot_df(processed_chromatograms, report_metabolite)
+        report_plot_df = build_plot_df(raw_chromatograms, report_metabolite)
         report_fig, _ = make_peak_shape_figure(
             plot_df=report_plot_df,
             metabolite=report_metabolite,
@@ -1428,6 +1447,7 @@ def app() -> None:
         else:
             report_settings = {
                 "m/z tolerance": f"{tolerance} {tolerance_unit}",
+                "XIC aggregation mode": xic_aggregation,
                 "expected RT window (+/- min)": rt_window_min,
                 "smoothing window (points)": smoothing_window_points,
                 "baseline mode": baseline_mode,

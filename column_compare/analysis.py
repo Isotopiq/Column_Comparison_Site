@@ -81,10 +81,13 @@ def extract_chromatograms(
     targets: list[MetaboliteTarget],
     tolerance: float,
     tolerance_unit: str = "ppm",
+    intensity_aggregation: Literal["sum", "max", "nearest"] = "nearest",
 ) -> dict[str, Chromatogram]:
     """Extract EIC traces for each metabolite target."""
     if tolerance <= 0:
         raise ValueError("m/z tolerance must be greater than zero.")
+    if intensity_aggregation not in {"sum", "max", "nearest"}:
+        raise ValueError("intensity_aggregation must be one of: sum, max, nearest")
 
     times: list[float] = []
     trace_map = {target.name: [] for target in targets}
@@ -94,17 +97,28 @@ def extract_chromatograms(
             continue
 
         mzs, intensities = spectrum.get_peaks()
-        if mzs.size == 0:
-            continue
-
         times.append(float(spectrum.getRT()) / 60.0)
         for target in targets:
+            if mzs.size == 0:
+                trace_map[target.name].append(0.0)
+                continue
             if tolerance_unit == "ppm":
                 mz_delta = target.mz * tolerance / 1_000_000.0
             else:
                 mz_delta = tolerance
             mask = (mzs >= target.mz - mz_delta) & (mzs <= target.mz + mz_delta)
-            value = float(np.sum(intensities[mask])) if np.any(mask) else 0.0
+            value = 0.0
+            if np.any(mask):
+                window_mzs = mzs[mask]
+                window_intensities = intensities[mask]
+                if intensity_aggregation == "sum":
+                    value = float(np.sum(window_intensities))
+                elif intensity_aggregation == "max":
+                    value = float(np.max(window_intensities))
+                else:
+                    # "nearest": closest m/z point to the target in this scan.
+                    nearest_idx = int(np.argmin(np.abs(window_mzs - target.mz)))
+                    value = float(window_intensities[nearest_idx])
             trace_map[target.name].append(value)
 
     chromatograms: dict[str, Chromatogram] = {}
