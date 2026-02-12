@@ -697,7 +697,7 @@ def app() -> None:
             else:
                 rt_col = None
 
-            st.dataframe(metabolite_df.head(20), use_container_width=True)
+            st.dataframe(metabolite_df.head(20), width="stretch")
             if st.button("Confirm metabolite table and continue", type="primary"):
                 st.session_state["metabolite_setup"] = {
                     "source_name": candidate_source_name or "uploaded_table",
@@ -713,7 +713,7 @@ def app() -> None:
     if active_metabolite_setup is None:
         st.info("Confirm a metabolite table to unlock mzXML upload and viewer.")
         template_df = default_metabolite_template()
-        st.dataframe(template_df, use_container_width=True)
+        st.dataframe(template_df, width="stretch")
         st.download_button(
             label="Download metabolite template (CSV)",
             data=template_df.to_csv(index=False).encode(),
@@ -782,7 +782,7 @@ def app() -> None:
                 required=True,
             ),
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key="run_mapping_editor",
     )
@@ -802,7 +802,7 @@ def app() -> None:
             mapping_df[mapping_df["run_id"].isin(duplicate_runs)][
                 ["file_name", "run_id", "column_id"]
             ],
-            use_container_width=True,
+            width="stretch",
         )
         return
 
@@ -820,7 +820,7 @@ def app() -> None:
         .sort_values("column_id")
     )
     st.markdown("**Current file-to-column assignment**")
-    st.dataframe(mapping_summary, use_container_width=True)
+    st.dataframe(mapping_summary, width="stretch")
 
     st.subheader("3) Edit peak integration bounds")
     st.caption(
@@ -835,7 +835,7 @@ def app() -> None:
     bounds_df = st.data_editor(
         default_bounds,
         disabled=["metabolite"],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key="integration_bounds_editor",
     )
@@ -943,7 +943,7 @@ def app() -> None:
     )
     metabolite_event = st.dataframe(
         metabolite_browser_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -1014,7 +1014,7 @@ def app() -> None:
                     line_color="#6B7280",
                     annotation_text="int end",
                 )
-            st.plotly_chart(peak_shape_fig, use_container_width=True)
+            st.plotly_chart(peak_shape_fig, width="stretch")
     else:
         st.warning("No chromatogram points available for selected metabolite.")
 
@@ -1046,12 +1046,12 @@ def app() -> None:
                 "note",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
     )
 
     st.subheader("5) Column-level efficiency summary")
     summary_df = summarise_columns(scored_metrics_df)
-    st.dataframe(summary_df, use_container_width=True)
+    st.dataframe(summary_df, width="stretch")
 
     st.subheader("6) Recommend best column for target analytes")
     selected_targets = st.multiselect(
@@ -1064,14 +1064,14 @@ def app() -> None:
     if ranking_df.empty:
         st.info("No ranking available for current selection.")
     else:
-        st.dataframe(ranking_df, use_container_width=True)
+        st.dataframe(ranking_df, width="stretch")
         ranking_fig = px.bar(
             ranking_df,
             x="column_id",
             y="composite_score",
             title="Composite column score (current standard runs)",
         )
-        st.plotly_chart(ranking_fig, use_container_width=True)
+        st.plotly_chart(ranking_fig, width="stretch")
 
     st.subheader("7) Heatmap: acceptable peak shape by metabolite and column")
     st.caption(
@@ -1090,8 +1090,8 @@ def app() -> None:
             labels={"x": "Column", "y": "Metabolite", "color": "Acceptable (%)"},
             title="Peak-shape acceptability heatmap",
         )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
-        st.dataframe(heatmap_df, use_container_width=True)
+        st.plotly_chart(heatmap_fig, width="stretch")
+        st.dataframe(heatmap_df, width="stretch")
 
     st.subheader("8) Metabolite notes")
     st.caption("Add notes for each metabolite. Notes are saved and available in future sessions.")
@@ -1101,7 +1101,7 @@ def app() -> None:
         notes_editor_df,
         disabled=["metabolite", "last_updated"],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key="metabolite_notes_editor",
     )
     if st.button("Save metabolite notes"):
@@ -1136,7 +1136,7 @@ def app() -> None:
     else:
         st.dataframe(
             library_df.sort_values(["column_id", "metabolite"]).reset_index(drop=True),
-            use_container_width=True,
+            width="stretch",
         )
 
         if selected_targets:
@@ -1145,14 +1145,14 @@ def app() -> None:
             if fit_df.empty:
                 st.info("Selected metabolites are not yet covered in the saved library.")
             else:
-                st.dataframe(fit_df, use_container_width=True)
+                st.dataframe(fit_df, width="stretch")
                 library_fit_fig = px.bar(
                     fit_df,
                     x="column_id",
                     y="library_fit_score",
                     title="Column fit score from saved RT standards",
                 )
-                st.plotly_chart(library_fit_fig, use_container_width=True)
+                st.plotly_chart(library_fit_fig, width="stretch")
 
     st.subheader("10) Export per-metabolite comparison report (HTML/PDF)")
     report_metabolite = st.selectbox(
@@ -1276,7 +1276,7 @@ def app() -> None:
                 mime="application/zip",
             )
             for image_name, image_bytes in images.items():
-                st.image(image_bytes, caption=image_name, use_container_width=True)
+                st.image(image_bytes, caption=image_name, width="stretch")
 
     st.download_button(
         label="Download analysis metrics (CSV)",
