@@ -160,6 +160,22 @@ def coerce_numeric_series_with_fallback(values: pd.Series) -> pd.Series:
     return coerced.fillna(fallback)
 
 
+def selected_rows_from_event(event: Any) -> list[int]:
+    if event is None:
+        return []
+    try:
+        rows = event.selection.rows
+        return list(rows) if rows is not None else []
+    except Exception:
+        pass
+    try:
+        selection = event.get("selection", {})
+        rows = selection.get("rows", [])
+        return list(rows) if rows is not None else []
+    except Exception:
+        return []
+
+
 def default_metabolite_template() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -256,9 +272,9 @@ def hash_inputs(
     return digest.hexdigest()
 
 
-def build_plot_df(chromatograms: dict[tuple[str, str, str], Any], metabolite: str) -> pd.DataFrame:
+def build_plot_df(chromatograms: dict[tuple[str, str, str, str], Any], metabolite: str) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
-    for (run_id, column_id, metabolite_name), trace in chromatograms.items():
+    for (run_id, column_id, file_name, metabolite_name), trace in chromatograms.items():
         if metabolite_name != metabolite:
             continue
         if trace.time_min.size == 0:
@@ -269,11 +285,14 @@ def build_plot_df(chromatograms: dict[tuple[str, str, str], Any], metabolite: st
                 "intensity": trace.intensity,
                 "run_id": run_id,
                 "column_id": column_id,
+                "file_name": file_name,
             }
         )
         rows.append(frame)
     if not rows:
-        return pd.DataFrame(columns=["time_min", "intensity", "run_id", "column_id"])
+        return pd.DataFrame(
+            columns=["time_min", "intensity", "run_id", "column_id", "file_name"]
+        )
     return pd.concat(rows, ignore_index=True)
 
 
@@ -281,6 +300,7 @@ def make_peak_shape_figure(
     plot_df: pd.DataFrame,
     metabolite: str,
     normalize_shape: bool,
+    facet_mode: str = "By column",
 ) -> tuple[Any | None, pd.DataFrame]:
     if plot_df.empty:
         return None, plot_df
@@ -288,18 +308,25 @@ def make_peak_shape_figure(
     chart_df = plot_df.copy()
     if normalize_shape:
         chart_df["intensity"] = (
-            chart_df.groupby("run_id")["intensity"]
+            chart_df.groupby("file_name")["intensity"]
             .transform(lambda values: values / values.max() if values.max() > 0 else values)
         )
+    facet_col = "column_id" if facet_mode == "By column" else "file_name"
     fig = px.line(
         chart_df,
         x="time_min",
         y="intensity",
-        color="run_id",
-        facet_col="column_id",
+        color="file_name",
+        facet_col=facet_col,
         facet_col_wrap=2,
         title=f"Peak shape for {metabolite}",
-        labels={"time_min": "Retention time (min)", "intensity": "Intensity"},
+        labels={
+            "time_min": "Retention time (min)",
+            "intensity": "Intensity",
+            "file_name": "mzXML file",
+            "column_id": "Column",
+        },
+        hover_data={"run_id": True, "column_id": True, "file_name": True},
     )
     fig.update_yaxes(matches=None)
     return fig, chart_df
@@ -373,15 +400,15 @@ def run_analysis(
     tolerance: float,
     tolerance_unit: str,
     rt_window_min: float,
-) -> tuple[pd.DataFrame, dict[tuple[str, str, str], Any], dict[tuple[str, str, str], Any]]:
+) -> tuple[pd.DataFrame, dict[tuple[str, str, str, str], Any], dict[tuple[str, str, str, str], Any]]:
     targets = parse_metabolite_table(metabolite_df, name_col=name_col, mz_col=mz_col, rt_col=rt_col)
     if not targets:
         raise ValueError("No valid metabolite rows were found after parsing your table.")
 
     uploaded_by_name = {file.name: file for file in uploaded_runs}
     metrics_rows: list[dict[str, Any]] = []
-    raw_chromatograms: dict[tuple[str, str, str], Any] = {}
-    processed_chromatograms: dict[tuple[str, str, str], Any] = {}
+    raw_chromatograms: dict[tuple[str, str, str, str], Any] = {}
+    processed_chromatograms: dict[tuple[str, str, str, str], Any] = {}
 
     for _, row in mapping_df.iterrows():
         file_name = str(row["file_name"])
@@ -421,9 +448,12 @@ def run_analysis(
                     integration_start_min=bounds[0],
                     integration_end_min=bounds[1],
                 )
-                metrics_rows.append(metrics.to_record())
-                raw_chromatograms[(run_id, column_id, target.name)] = raw_trace
-                processed_chromatograms[(run_id, column_id, target.name)] = processed_trace
+                record = metrics.to_record()
+                record["file_name"] = file_name
+                metrics_rows.append(record)
+                key = (run_id, column_id, file_name, target.name)
+                raw_chromatograms[key] = raw_trace
+                processed_chromatograms[key] = processed_trace
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -725,10 +755,33 @@ def app() -> None:
             for file in uploaded_runs
         ]
     )
-    st.caption("Edit run and column labels before analysis.")
+    st.caption(
+        "Assign each mzXML file to the correct column. "
+        "Each run_id must be unique so chromatograms are tracked accurately."
+    )
+    default_column_options = sorted(default_mapping["column_id"].dropna().astype(str).unique().tolist())
+    custom_column_text = st.text_input(
+        "Column IDs (comma-separated, used as assignment options)",
+        value=", ".join(default_column_options),
+        help="Example: HILIC_A, HILIC_B, RP_18",
+    )
+    custom_column_options = [
+        token.strip() for token in custom_column_text.split(",") if token.strip()
+    ]
+    column_options = sorted(set(default_column_options + custom_column_options))
+    if not column_options:
+        column_options = ["Column_1"]
+
     mapping_df = st.data_editor(
         default_mapping,
         disabled=["file_name"],
+        column_config={
+            "column_id": st.column_config.SelectboxColumn(
+                "column_id",
+                options=column_options if column_options else default_column_options,
+                required=True,
+            ),
+        },
         use_container_width=True,
         hide_index=True,
         key="run_mapping_editor",
@@ -738,6 +791,36 @@ def app() -> None:
         mapping_df[col] = mapping_df[col].astype(str).str.strip()
     mapping_df["run_id"] = mapping_df["run_id"].replace("", pd.NA).fillna(mapping_df["file_name"])
     mapping_df["column_id"] = mapping_df["column_id"].replace("", pd.NA).fillna(mapping_df["run_id"])
+
+    duplicate_runs = mapping_df[mapping_df["run_id"].duplicated(keep=False)]["run_id"].tolist()
+    duplicate_runs = sorted(set(duplicate_runs))
+    if duplicate_runs:
+        st.error(
+            "Duplicate run_id values found. Please make run_id unique per mzXML file before running analysis."
+        )
+        st.dataframe(
+            mapping_df[mapping_df["run_id"].isin(duplicate_runs)][
+                ["file_name", "run_id", "column_id"]
+            ],
+            use_container_width=True,
+        )
+        return
+
+    if mapping_df["column_id"].astype(str).str.strip().eq("").any():
+        st.error("Each mzXML file must be assigned to a column_id.")
+        return
+
+    mapping_summary = (
+        mapping_df.groupby("column_id", dropna=False)
+        .agg(
+            n_files=("file_name", "count"),
+            files=("file_name", lambda values: ", ".join(sorted(values))),
+        )
+        .reset_index()
+        .sort_values("column_id")
+    )
+    st.markdown("**Current file-to-column assignment**")
+    st.dataframe(mapping_summary, use_container_width=True)
 
     st.subheader("3) Edit peak integration bounds")
     st.caption(
@@ -838,7 +921,60 @@ def app() -> None:
     }
 
     st.subheader("4) Peak-shape comparison (side-by-side by column)")
-    selected_metabolite = st.selectbox("Metabolite to visualize", metabolite_options, index=0)
+    metabolite_browser_df = (
+        scored_metrics_df.groupby("metabolite", dropna=False)
+        .agg(
+            n_runs=("run_id", "nunique"),
+            n_columns=("column_id", "nunique"),
+            detected_runs=("has_peak", "sum"),
+            acceptable_runs=("is_acceptable_shape", "sum"),
+            median_apex_rt_min=("apex_rt_min", "median"),
+        )
+        .reset_index()
+        .sort_values("metabolite")
+        .reset_index(drop=True)
+    )
+    metabolite_browser_df["acceptable_pct"] = (
+        metabolite_browser_df["acceptable_runs"] / metabolite_browser_df["n_runs"].clip(lower=1) * 100.0
+    )
+    st.caption(
+        "Click a metabolite row below to update the chromatogram view. "
+        "This shows traces from each mapped column file."
+    )
+    metabolite_event = st.dataframe(
+        metabolite_browser_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="metabolite_click_table",
+    )
+    if (
+        "selected_metabolite_name" not in st.session_state
+        or st.session_state["selected_metabolite_name"] not in metabolite_options
+    ):
+        st.session_state["selected_metabolite_name"] = metabolite_options[0]
+
+    clicked_rows = selected_rows_from_event(metabolite_event)
+    if clicked_rows:
+        row_idx = int(clicked_rows[0])
+        if 0 <= row_idx < len(metabolite_browser_df):
+            st.session_state["selected_metabolite_name"] = str(
+                metabolite_browser_df.iloc[row_idx]["metabolite"]
+            )
+
+    selected_metabolite = st.selectbox(
+        "Selected metabolite",
+        metabolite_options,
+        key="selected_metabolite_name",
+    )
+
+    facet_mode = st.radio(
+        "Chromatogram layout",
+        ["By column", "By file"],
+        horizontal=True,
+        help="By column groups traces by assigned column_id. By file shows one panel per mzXML file.",
+    )
     trace_view_mode = st.radio(
         "Trace view",
         ["Processed trace", "Raw trace"],
@@ -860,6 +996,7 @@ def app() -> None:
             plot_df=plot_df,
             metabolite=selected_metabolite,
             normalize_shape=normalize_shape,
+            facet_mode=facet_mode,
         )
         bounds = integration_bounds.get(selected_metabolite, (None, None))
         if peak_shape_fig is not None:
@@ -892,6 +1029,7 @@ def app() -> None:
     st.dataframe(
         metabolite_metrics[
             [
+                "file_name",
                 "column_id",
                 "run_id",
                 "metabolite",

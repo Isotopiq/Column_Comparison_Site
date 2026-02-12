@@ -70,7 +70,8 @@ Upload one or more standard runs. In the app you can edit:
    - baseline correction mode
 3. Edit integration bounds per metabolite (optional).
 4. Run comparison and inspect:
-   - peak-shape facets
+   - click metabolite rows to load chromatograms
+   - peak-shape facets by column or by file
    - run-level metrics
    - column ranking
    - acceptability heatmap
