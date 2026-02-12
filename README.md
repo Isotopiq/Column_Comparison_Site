@@ -63,6 +63,8 @@ Upload one or more standard runs. In the app you can edit:
 ## New workflow highlights
 
 1. Upload metabolite list and mzXML files.
+   - Metabolite upload now supports **Upload new file** or **Use saved file**.
+   - Click **Confirm metabolite table and continue** to unlock mzXML upload/viewer.
 2. Adjust processing:
    - smoothing window
    - baseline correction mode

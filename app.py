@@ -43,6 +43,7 @@ from column_compare.storage import (
 
 DEFAULT_LIBRARY_PATH = "data/retention_library.json"
 DEFAULT_NOTES_PATH = "data/metabolite_notes.json"
+DEFAULT_METABOLITE_TABLE_DIR = "data/metabolite_tables"
 
 
 def infer_default_column(run_name: str) -> str:
@@ -55,10 +56,8 @@ def infer_default_column(run_name: str) -> str:
     return stem
 
 
-def read_metabolite_table(uploaded_file) -> pd.DataFrame:
-    raw_bytes = uploaded_file.getvalue()
-    suffix = Path(uploaded_file.name).suffix.lower()
-
+def read_metabolite_table_bytes(raw_bytes: bytes, file_name: str) -> pd.DataFrame:
+    suffix = Path(file_name).suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         return pd.read_excel(io.BytesIO(raw_bytes))
 
@@ -66,6 +65,99 @@ def read_metabolite_table(uploaded_file) -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(raw_bytes))
     except pd.errors.ParserError:
         return pd.read_csv(io.BytesIO(raw_bytes), sep=";")
+
+
+def read_metabolite_table(uploaded_file) -> pd.DataFrame:
+    return read_metabolite_table_bytes(uploaded_file.getvalue(), uploaded_file.name)
+
+
+def read_metabolite_table_path(path: str | Path) -> pd.DataFrame:
+    path_obj = Path(path)
+    return read_metabolite_table_bytes(path_obj.read_bytes(), path_obj.name)
+
+
+def _safe_filename_stem(name: str) -> str:
+    clean = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in name)
+    clean = clean.strip("_")
+    return clean or "metabolites"
+
+
+def persist_uploaded_metabolite_file(
+    uploaded_file,
+    target_directory: str = DEFAULT_METABOLITE_TABLE_DIR,
+) -> Path:
+    raw_bytes = uploaded_file.getvalue()
+    suffix = Path(uploaded_file.name).suffix.lower() or ".csv"
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:12]
+    stem = _safe_filename_stem(Path(uploaded_file.name).stem)
+    target_dir = Path(target_directory)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"{stem}_{digest}{suffix}"
+    if not path.exists():
+        path.write_bytes(raw_bytes)
+    return path
+
+
+def list_saved_metabolite_tables(
+    target_directory: str = DEFAULT_METABOLITE_TABLE_DIR,
+) -> list[Path]:
+    target_dir = Path(target_directory)
+    if not target_dir.exists():
+        return []
+    allowed = {".csv", ".txt", ".xlsx", ".xls"}
+    paths = [p for p in target_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed]
+    return sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _guess_column(
+    columns: list[str],
+    preferred_exact: list[str],
+    preferred_contains: list[str],
+) -> str | None:
+    normalized_map = {col.lower().strip(): col for col in columns}
+    for candidate in preferred_exact:
+        if candidate in normalized_map:
+            return normalized_map[candidate]
+
+    for col in columns:
+        lowered = col.lower().strip()
+        if any(token in lowered for token in preferred_contains):
+            return col
+    return None
+
+
+def guess_metabolite_columns(columns: list[str]) -> tuple[str, str, str | None]:
+    name_col = _guess_column(
+        columns,
+        preferred_exact=["metabolite", "compound", "analyte", "name"],
+        preferred_contains=["metab", "compound", "analyte", "name"],
+    )
+    mz_col = _guess_column(
+        columns,
+        preferred_exact=["m/z", "mz", "mass_to_charge"],
+        preferred_contains=["m/z", "mz"],
+    )
+    rt_col = _guess_column(
+        columns,
+        preferred_exact=["rt", "retention_time", "retention time"],
+        preferred_contains=["retention", "rt"],
+    )
+    return (
+        name_col or columns[0],
+        mz_col or columns[0],
+        rt_col,
+    )
+
+
+def coerce_numeric_series_with_fallback(values: pd.Series) -> pd.Series:
+    as_text = values.astype(str).str.replace(",", ".", regex=False)
+    coerced = pd.to_numeric(as_text, errors="coerce")
+    if coerced.notna().all():
+        return coerced
+
+    extracted = as_text.str.extract(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", expand=False)
+    fallback = pd.to_numeric(extracted, errors="coerce")
+    return coerced.fillna(fallback)
 
 
 def default_metabolite_template() -> pd.DataFrame:
@@ -450,16 +542,146 @@ def app() -> None:
     rt_library = load_rt_library(library_path)
     library_df = rt_library_to_dataframe(rt_library)
     notes_store = load_notes_store(notes_path)
+    if "metabolite_setup" not in st.session_state:
+        st.session_state["metabolite_setup"] = None
 
-    st.subheader("1) Upload metabolite list")
-    metabolite_file = st.file_uploader(
-        "Metabolite table (CSV/Excel). Must contain metabolite name and m/z.",
-        type=["csv", "txt", "xlsx", "xls"],
-        accept_multiple_files=False,
+    st.subheader("1) Upload or select metabolite list")
+    st.caption(
+        "Supported formats include columns like `compound`, `m/z`, and `RT`. "
+        "Click **Confirm metabolite table and continue** to unlock mzXML upload."
     )
 
-    if metabolite_file is None:
-        st.info("No metabolite table uploaded yet. A template is shown below.")
+    source_mode = st.radio(
+        "Metabolite source",
+        ["Upload new file", "Use saved file"],
+        horizontal=True,
+        key="metabolite_source_mode",
+    )
+
+    candidate_metabolite_df: pd.DataFrame | None = None
+    candidate_source_name: str | None = None
+    saved_tables = list_saved_metabolite_tables()
+
+    if source_mode == "Upload new file":
+        metabolite_file = st.file_uploader(
+            "Metabolite table (CSV/Excel)",
+            type=["csv", "txt", "xlsx", "xls"],
+            accept_multiple_files=False,
+        )
+        if metabolite_file is not None:
+            try:
+                candidate_metabolite_df = read_metabolite_table(metabolite_file)
+            except Exception as exc:
+                st.error(f"Failed to read metabolite table: {exc}")
+            else:
+                cached_path = persist_uploaded_metabolite_file(metabolite_file)
+                candidate_source_name = metabolite_file.name
+                st.caption(f"Saved for reuse as: `{cached_path.name}`")
+    else:
+        if not saved_tables:
+            st.info("No saved metabolite tables found yet. Upload one to create reusable history.")
+        else:
+            saved_names = [path.name for path in saved_tables]
+            selected_saved_name = st.selectbox(
+                "Previously uploaded metabolite tables",
+                saved_names,
+                index=0,
+            )
+            selected_saved_path = next(path for path in saved_tables if path.name == selected_saved_name)
+            try:
+                candidate_metabolite_df = read_metabolite_table_path(selected_saved_path)
+            except Exception as exc:
+                st.error(f"Failed to read saved metabolite table: {exc}")
+            else:
+                candidate_source_name = selected_saved_name
+                st.caption(f"Loaded from `{selected_saved_path}`")
+
+    if candidate_metabolite_df is not None:
+        if candidate_metabolite_df.empty:
+            st.warning("Selected metabolite table is empty.")
+        else:
+            metabolite_df = candidate_metabolite_df.copy()
+            all_columns = list(metabolite_df.columns)
+            guessed_name_col, guessed_mz_col, guessed_rt_col = guess_metabolite_columns(all_columns)
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                name_col = st.selectbox(
+                    "Metabolite name column",
+                    all_columns,
+                    index=all_columns.index(guessed_name_col),
+                    key="metabolite_name_column_select",
+                )
+            with col_b:
+                mz_col = st.selectbox(
+                    "m/z column",
+                    all_columns,
+                    index=all_columns.index(guessed_mz_col),
+                    key="metabolite_mz_column_select",
+                )
+            with col_c:
+                rt_choices = ["(none)"] + all_columns
+                default_rt_index = rt_choices.index(guessed_rt_col) if guessed_rt_col in rt_choices else 0
+                rt_col_pick = st.selectbox(
+                    "Expected RT column (optional)",
+                    rt_choices,
+                    index=default_rt_index,
+                    key="metabolite_rt_column_select",
+                )
+
+            if not library_df.empty:
+                st.caption("Optional: auto-fill expected RTs from your saved standard library.")
+                library_columns = sorted(library_df["column_id"].dropna().unique().tolist())
+                selected_library_column = st.selectbox(
+                    "Use expected RTs from saved library column",
+                    ["(none)"] + library_columns,
+                    index=0,
+                    key="metabolite_library_column_select",
+                )
+                if selected_library_column != "(none)":
+                    metabolite_df = merge_expected_rts(
+                        metabolite_table=metabolite_df,
+                        column_id=selected_library_column,
+                        library=rt_library,
+                        metabolite_col=name_col,
+                    )
+                    rt_col_pick = "expected_rt_from_library_min"
+                    st.success(
+                        "Expected RTs were merged from your saved library for this column where metabolite names match."
+                    )
+
+            metabolite_df[mz_col] = coerce_numeric_series_with_fallback(metabolite_df[mz_col])
+            dropped = int(metabolite_df[mz_col].isna().sum())
+            metabolite_df = metabolite_df[metabolite_df[mz_col].notna()].copy()
+            if dropped:
+                st.warning(f"Dropped {dropped} metabolite rows due to non-numeric m/z values.")
+
+            if rt_col_pick != "(none)":
+                metabolite_df[rt_col_pick] = coerce_numeric_series_with_fallback(metabolite_df[rt_col_pick])
+                invalid_rt = int(metabolite_df[rt_col_pick].isna().sum())
+                rt_col: str | None = rt_col_pick
+                if invalid_rt:
+                    st.caption(
+                        f"{invalid_rt} rows have missing or non-numeric RT values and will be treated as unknown."
+                    )
+            else:
+                rt_col = None
+
+            st.dataframe(metabolite_df.head(20), use_container_width=True)
+            if st.button("Confirm metabolite table and continue", type="primary"):
+                st.session_state["metabolite_setup"] = {
+                    "source_name": candidate_source_name or "uploaded_table",
+                    "name_col": name_col,
+                    "mz_col": mz_col,
+                    "rt_col": rt_col,
+                    "metabolite_df_json": metabolite_df.to_json(orient="split"),
+                }
+                st.session_state["analysis_state"] = {}
+                st.success("Metabolite table confirmed. Continue with mzXML upload below.")
+
+    active_metabolite_setup = st.session_state.get("metabolite_setup")
+    if active_metabolite_setup is None:
+        st.info("Confirm a metabolite table to unlock mzXML upload and viewer.")
         template_df = default_metabolite_template()
         st.dataframe(template_df, use_container_width=True)
         st.download_button(
@@ -470,65 +692,18 @@ def app() -> None:
         )
         return
 
-    try:
-        metabolite_df = read_metabolite_table(metabolite_file)
-    except Exception as exc:
-        st.error(f"Failed to read metabolite table: {exc}")
-        return
-
-    if metabolite_df.empty:
-        st.warning("Uploaded metabolite table is empty.")
-        return
-
-    all_columns = list(metabolite_df.columns)
-    guessed_name_col = next((c for c in all_columns if "metab" in c.lower()), all_columns[0])
-    guessed_mz_col = next((c for c in all_columns if c.lower() in {"mz", "m/z"}), all_columns[0])
-    guessed_rt_col = next((c for c in all_columns if "rt" in c.lower()), None)
-
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        name_col = st.selectbox("Metabolite name column", all_columns, index=all_columns.index(guessed_name_col))
-    with col_b:
-        mz_col = st.selectbox("m/z column", all_columns, index=all_columns.index(guessed_mz_col))
-    with col_c:
-        rt_choices = ["(none)"] + all_columns
-        default_rt_index = rt_choices.index(guessed_rt_col) if guessed_rt_col in rt_choices else 0
-        rt_col_pick = st.selectbox("Expected RT column (optional)", rt_choices, index=default_rt_index)
-
-    selected_library_column = None
-    if not library_df.empty:
-        st.caption("Optional: auto-fill expected RTs from your saved standard library.")
-        library_columns = sorted(library_df["column_id"].dropna().unique().tolist())
-        selected_library_column = st.selectbox(
-            "Use expected RTs from saved library column",
-            ["(none)"] + library_columns,
-            index=0,
-        )
-        if selected_library_column != "(none)":
-            metabolite_df = merge_expected_rts(
-                metabolite_table=metabolite_df,
-                column_id=selected_library_column,
-                library=rt_library,
-                metabolite_col=name_col,
-            )
-            rt_col_pick = "expected_rt_from_library_min"
-            st.success(
-                "Expected RTs were merged from your saved library for this column where metabolite names match."
-            )
-
-    metabolite_df[mz_col] = pd.to_numeric(metabolite_df[mz_col], errors="coerce")
-    dropped = int(metabolite_df[mz_col].isna().sum())
-    metabolite_df = metabolite_df[metabolite_df[mz_col].notna()].copy()
-    if dropped:
-        st.warning(f"Dropped {dropped} metabolite rows due to non-numeric m/z values.")
-
-    if rt_col_pick != "(none)":
-        metabolite_df[rt_col_pick] = pd.to_numeric(metabolite_df[rt_col_pick], errors="coerce")
-        rt_col: str | None = rt_col_pick
-    else:
-        rt_col = None
-
-    st.dataframe(metabolite_df.head(20), use_container_width=True)
+    metabolite_df = pd.read_json(io.StringIO(active_metabolite_setup["metabolite_df_json"]), orient="split")
+    name_col = str(active_metabolite_setup["name_col"])
+    mz_col = str(active_metabolite_setup["mz_col"])
+    rt_col = active_metabolite_setup["rt_col"]
+    st.success(
+        f"Active metabolite table: `{active_metabolite_setup['source_name']}` "
+        f"({len(metabolite_df)} metabolites with valid m/z)."
+    )
+    if st.button("Clear active metabolite table"):
+        st.session_state["metabolite_setup"] = None
+        st.session_state["analysis_state"] = {}
+        st.rerun()
 
     st.subheader("2) Upload mzXML standard runs")
     uploaded_runs = st.file_uploader(
